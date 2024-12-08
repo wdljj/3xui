@@ -39,12 +39,31 @@ arch() {
 echo "arch: $(arch)"
 
 os_version=""
+
 os_version=$(grep "^VERSION_ID" /etc/os-release | cut -d '=' -f2 | tr -d '"' | tr -d '.')
 
-# Skip OS check for simplicity (optional)
-# Check and install dependencies, modify based on your OS
+# Skip OS check and directly install for supported versions (can be extended)
 install_base() {
-    apt-get update && apt-get install -y -q wget curl tar tzdata
+    case "${release}" in
+    ubuntu | debian | armbian)
+        apt-get update && apt-get install -y -q wget curl tar tzdata
+        ;;
+    centos | almalinux | rocky | ol)
+        yum -y update && yum install -y -q wget curl tar tzdata
+        ;;
+    fedora | amzn)
+        dnf -y update && dnf install -y -q wget curl tar tzdata
+        ;;
+    arch | manjaro | parch)
+        pacman -Syu && pacman -Syu --noconfirm wget curl tar tzdata
+        ;;
+    opensuse-tumbleweed)
+        zypper refresh && zypper -q install -y wget curl tar timezone
+        ;;
+    *)
+        apt-get update && apt install -y -q wget curl tar tzdata
+        ;;
+    esac
 }
 
 gen_random_string() {
@@ -53,90 +72,98 @@ gen_random_string() {
     echo "$random_string"
 }
 
-# This function will skip the need for input and automatically generate settings
+# Auto-configure after install
 config_after_install() {
-    # Generate random credentials and settings
-    local config_username=$(gen_random_string 10)
-    local config_password=$(gen_random_string 10)
-    local config_webBasePath=$(gen_random_string 15)
-    local config_port=$(shuf -i 1024-62000 -n 1)
+    local existing_username=$(/usr/local/x-ui/x-ui setting -show true | grep -Eo 'username: .+' | awk '{print $2}')
+    local existing_password=$(/usr/local/x-ui/x-ui setting -show true | grep -Eo 'password: .+' | awk '{print $2}')
+    local existing_webBasePath=$(/usr/local/x-ui/x-ui setting -show true | grep -Eo 'webBasePath: .+' | awk '{print $2}')
+    local existing_port=$(/usr/local/x-ui/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
     local server_ip=$(curl -s https://api.ipify.org)
 
-    echo -e "${yellow}Auto-generated settings:${plain}"
-    echo -e "###############################################"
-    echo -e "${green}Username: ${config_username}${plain}"
-    echo -e "${green}Password: ${config_password}${plain}"
-    echo -e "${green}Port: ${config_port}${plain}"
-    echo -e "${green}WebBasePath: ${config_webBasePath}${plain}"
-    echo -e "${green}Access URL: http://${server_ip}:${config_port}/${config_webBasePath}${plain}"
-    echo -e "###############################################"
+    if [[ ${#existing_webBasePath} -lt 4 ]]; then
+        # Generate random values
+        local config_webBasePath=$(gen_random_string 15)
+        local config_username=$(gen_random_string 10)
+        local config_password=$(gen_random_string 10)
+        local config_port=$(shuf -i 1024-62000 -n 1)
 
-    # Apply these settings directly without user input
-    /usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
+        echo -e "${yellow}Generated random configuration:${plain}"
+        echo -e "Username: ${config_username}"
+        echo -e "Password: ${config_password}"
+        echo -e "Port: ${config_port}"
+        echo -e "WebBasePath: ${config_webBasePath}"
+        echo -e "Access URL: http://${server_ip}:${config_port}/${config_webBasePath}"
+
+        /usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
+    fi
+
     /usr/local/x-ui/x-ui migrate
 }
 
-install_x-ui() {
+# Install x-ui automatically without prompts
+install_x_ui() {
     cd /usr/local/
 
-    # Download and install the latest version
-    tag_version=$(curl -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ ! -n "$tag_version" ]]; then
-        echo -e "${red}Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later${plain}"
-        exit 1
-    fi
-    echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-    wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
-        exit 1
+    if [ $# == 0 ]; then
+        tag_version=$(curl -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ ! -n "$tag_version" ]]; then
+            echo -e "${red}Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later${plain}"
+            exit 1
+        fi
+        echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
+        wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
+        if [[ $? -ne 0 ]]; then
+            echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
+            exit 1
+        fi
+    else
+        tag_version=$1
+        tag_version_numeric=${tag_version#v}
+        min_version="2.3.5"
+
+        if [[ "$(printf '%s\n' "$min_version" "$tag_version_numeric" | sort -V | head -n1)" != "$min_version" ]]; then
+            echo -e "${red}Please use a newer version (at least v2.3.5). Exiting installation.${plain}"
+            exit 1
+        fi
+
+        url="https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz"
+        echo -e "Beginning to install x-ui $1"
+        wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz ${url}
+        if [[ $? -ne 0 ]]; then
+            echo -e "${red}Download x-ui $1 failed, please check if the version exists ${plain}"
+            exit 1
+        fi
     fi
 
-    # Install the downloaded version
     if [[ -e /usr/local/x-ui/ ]]; then
         systemctl stop x-ui
         rm /usr/local/x-ui/ -rf
     fi
+
     tar zxvf x-ui-linux-$(arch).tar.gz
     rm x-ui-linux-$(arch).tar.gz -f
     cd x-ui
     chmod +x x-ui
 
-    # Setup systemd service
+    # Check the system's architecture and rename the file accordingly
+    if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then
+        mv bin/xray-linux-$(arch) bin/xray-linux-arm
+        chmod +x bin/xray-linux-arm
+    fi
+
+    chmod +x x-ui bin/xray-linux-$(arch)
     cp -f x-ui.service /etc/systemd/system/
     wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
     chmod +x /usr/local/x-ui/x-ui.sh
     chmod +x /usr/bin/x-ui
-
-    config_after_install  # Run the auto-configuration
+    config_after_install
 
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
-
     echo -e "${green}x-ui ${tag_version}${plain} installation finished, it is running now..."
-    echo -e ""
-    echo -e "x-ui control menu usages: "
-    echo -e "----------------------------------------------"
-    echo -e "SUBCOMMANDS:"
-    echo -e "x-ui              - Admin Management Script"
-    echo -e "x-ui start        - Start"
-    echo -e "x-ui stop         - Stop"
-    echo -e "x-ui restart      - Restart"
-    echo -e "x-ui status       - Current Status"
-    echo -e "x-ui settings     - Current Settings"
-    echo -e "x-ui enable       - Enable Autostart on OS Startup"
-    echo -e "x-ui disable      - Disable Autostart on OS Startup"
-    echo -e "x-ui log          - Check logs"
-    echo -e "x-ui banlog       - Check Fail2ban ban logs"
-    echo -e "x-ui update       - Update"
-    echo -e "x-ui legacy       - legacy version"
-    echo -e "x-ui install      - Install"
-    echo -e "x-ui uninstall    - Uninstall"
-    echo -e "----------------------------------------------"
 }
 
-# Start installation
 echo -e "${green}Running...${plain}"
 install_base
-install_x-ui $1
+install_x_ui $1
